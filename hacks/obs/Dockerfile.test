@@ -1,5 +1,5 @@
 # shellcheck disable=SC2148
-FROM opensuse/tumbleweed@sha256:571d4f632fd2030e0cce6620f95c450d9cec847fd80047f92fce9c227aee03b0
+FROM opensuse/tumbleweed@sha256:21195432c141fd2ad48520df0f58ba4410b6a0d09989395623acaedfbdccf14e
 
 RUN zypper refresh && \
     zypper addrepo https://download.opensuse.org/repositories/openSUSE:Tools/openSUSE_Tumbleweed/openSUSE:Tools.repo && \
