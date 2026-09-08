@@ -1,273 +1,110 @@
-name: PR
+name: Windows WebSocket logging proof
 
 on:
   workflow_dispatch:
-
-  pull_request:
-    branches:
-      - main
   push:
     branches:
-      - main
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+      - fix/666-windows-proof
 
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_PROFILE_DEV_DEBUG: 0
-  RUST_BACKTRACE: 1
+concurrency:
+  group: websocket-proof-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  frontend-lint:
-    name: Biome
-    runs-on: ubuntu-22.04
+  windows-proof:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_RELEASE_STRIP: false
+      CMAKE_GENERATOR: Ninja
+      AWS_LC_SYS_PREBUILT_NASM: 1
+      VITE_ENV: production
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          version: 12
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          fetch-depth: 2
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:
-          node-version: "26"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Perform linting
-        run: pnpm --filter @kftray/ui run lint:check
-
-  rust-format:
-    name: rustfmt
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+          version: 12.3.4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          toolchain: nightly
-          components: rustfmt
-
-      - name: Run rustfmt
-        run: cargo +nightly fmt --all -- --check
-
-  rust-lint:
-    name: Clippy
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            os_name: linux
-            rust_target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            os_name: macos
-            rust_target: aarch64-apple-darwin
-          - os: windows-latest
-            os_name: windows
-            rust_target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install dependencies
-        if: matrix.os_name == 'linux'
+          node-version: '26'
+          cache: pnpm
+      - name: Verify pnpm execution and install dependencies
         run: |
-          sudo apt-get update
-          sudo apt install -y \
-              build-essential \
-              curl \
-              wget \
-              file \
-              libxdo-dev \
-              libssl-dev \
-              libayatana-appindicator3-dev \
-              librsvg2-dev \
-              libwebkit2gtk-4.1-dev \
-              patchelf \
-              xdg-utils
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+          $shimVersion = pnpm --version
+          Write-Host "PowerShell shim version output: '$shimVersion'"
+          $pnpmVersion = pnpm.cmd --version
+          if ($LASTEXITCODE -ne 0 -or "$pnpmVersion".Trim() -ne '12.3.4') {
+            throw "pnpm.cmd did not execute the required version"
+          }
+          pnpm.cmd install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path node_modules/.modules.yaml)) {
+            throw "pnpm install did not create the workspace dependency metadata"
+          }
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: stable
-          targets: ${{ matrix.rust_target }}
-          components: clippy
-
-      - name: Set up Perl on Windows
-        if: matrix.os == 'windows-latest'
-        uses: shogo82148/actions-setup-perl@53e33bb27be492a926eee378e8a5f7ff6618b061 # v1.43.1
+      - uses: shogo82148/actions-setup-perl@53e33bb27be492a926eee378e8a5f7ff6618b061
         with:
-          perl-version: "5.32"
-          distribution: "strawberry"
-
-      - name: Set Perl environment variables
-        if: matrix.os == 'windows-latest'
+          perl-version: '5.32'
+          distribution: strawberry
+      - name: Install native build dependencies
+        run: choco install nasm ninja -y
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: websocket-windows-proof
+          cache-on-failure: true
+      - name: Test actual transport and handshake logs
+        run: |
+          cargo test --locked -p kftray-http-logs --lib http_response_analyzer::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p kftray-portforward --lib kube::tcp_forwarder::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build unsigned desktop testing binary
+        run: |
+          pnpm.cmd tauri build --no-bundle --ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($binary in @('kftray.exe', 'kftray-helper.exe')) {
+            if (-not (Test-Path "target/release/$binary")) {
+              throw "Desktop build did not produce $binary"
+            }
+          }
+      - name: Assemble proof archive
         shell: pwsh
         run: |
-          echo "PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          echo "OPENSSL_SRC_PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Cache Rust
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+          New-Item -ItemType Directory -Path proof
+          Copy-Item target/release/kftray.exe proof/kftray.exe
+          Copy-Item target/release/kftray-helper.exe proof/kftray-helper.exe
+          $sourceCommit = git rev-parse --verify 'HEAD^'
+          if ($LASTEXITCODE -ne 0 -or $sourceCommit -ne '1909d30ec3f61dac17a2ece0569a82f94f4965e6') {
+            throw "Unexpected source provenance"
+          }
+          $buildCommit = git rev-parse --verify HEAD
+          if ($LASTEXITCODE -ne 0 -or $buildCommit -notmatch '^[0-9a-f]{40}$') {
+            throw "Invalid build provenance"
+          }
+          @"
+          KFtray Windows x64 development proof (unsigned, not a release).
+          Source commit: $sourceCommit
+          Build-workflow commit: $buildCommit
+          Unzip both executable files together and run kftray.exe.
+          Requires the Microsoft Edge WebView2 runtime.
+          Compare the same forwarding configuration with HTTP logging enabled and disabled.
+          Expected with logging enabled: the 101 handshake is logged once, later frames are not logged as HTTP, and bidirectional WebSocket traffic is preserved.
+          The original OpenClaw gateway failure has not been reproduced; this build does not establish that issue 666 is fixed.
+          "@ | Set-Content proof/BUILD.txt
+          Get-FileHash proof/*.exe -Algorithm SHA256 | Format-Table -AutoSize | Out-String -Width 200 | Set-Content proof/SHA256SUMS.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          key: rust-lint-${{ matrix.os }}-${{ matrix.rust_target }}
-          shared-key: deps-lint-${{ matrix.rust_target }}
-          workspaces: |
-            .
-            crates/kftray-helper
-          cache-on-failure: false
-
-      - name: build kftray-helper
-        run: cargo build --bin kftray-helper --release
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-  rust-coverage:
-    name: Code Coverage
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt install -y \
-              build-essential \
-              curl \
-              wget \
-              file \
-              libxdo-dev \
-              libssl-dev \
-              libayatana-appindicator3-dev \
-              librsvg2-dev \
-              libwebkit2gtk-4.1-dev \
-              patchelf \
-              xdg-utils
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: llvm-tools
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
-        with:
-          tool: cargo-llvm-cov
-
-      - name: Install nextest
-        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
-        with:
-          tool: cargo-nextest
-
-      - name: Cache Rust
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: rust-coverage-ci-${{ runner.os }}
-          shared-key: deps-coverage-ci
-          cache-directories: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          cache-on-failure: false
-
-      - name: Install cargo-insta
-        run: cargo install cargo-insta
-
-      - name: Run tests
-        run: cargo build --bin kftray-helper --release && INSTA_UPDATE=1 cargo llvm-cov nextest --profile ci --config-file .cargo/nextest.toml --locked --workspace --all-features --lib --bins --examples --tests --lcov --output-path lcov.info
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
-          slug: hcavarsan/kftray
-
-      - name: Upload test results
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        if: ${{ !cancelled() }}
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: target/nextest/ci/junit.xml
-          slug: hcavarsan/kftray
-          report_type: test_results
-
-  frontend-bundle-analysis:
-    name: Bundle Analysis
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "26"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend with bundle analysis
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        run: pnpm --filter @kftray/ui run build
-
-  build-and-push-docker:
-    if: ${{ contains(github.event.pull_request.title, '[docker]') }}
-    permissions:
-      contents: read
-      packages: write
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          platforms: linux/amd64,linux/arm64
-          context: .
-          file: ./crates/kftray-server/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/kftray-server:${{ github.sha }}
+          name: kftray-windows-x64-websocket-proof
+          path: proof/
+          if-no-files-found: error
+          retention-days: 14
